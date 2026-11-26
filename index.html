@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MagIC Viewer</title>
+<meta name="description" content="Interactive 3D viewer for MagIC spherical-shell simulation output, running entirely in the browser.">
+<link rel="stylesheet" href="css/style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="app">
+  <aside id="panel" aria-label="Controls">
+    <header class="brand">
+      <div>
+        <h1>MagIC Viewer</h1>
+      </div>
+      <button id="panelToggle" class="icon-btn" aria-label="Collapse controls" title="Collapse controls">‹</button>
+    </header>
+
+    <div class="panel-body">
+      <section>
+        <h2>Data</h2>
+        <label class="drop" id="drop">
+          <input type="file" id="fileInput" hidden>
+          <span class="drop-title">Open a file</span>
+          <span class="drop-hint">or drop it anywhere</span>
+        </label>
+        <form id="urlForm" class="row">
+          <input type="url" id="urlInput" placeholder="…or paste a file URL" aria-label="File URL">
+          <button type="submit">Load</button>
+        </form>
+        <div class="mem">
+          <div class="mem-head"><span>Memory</span><span id="memText"></span></div>
+          <div class="progress mem-bar" role="presentation"><div id="memBar"></div></div>
+          <p class="hint" id="memNote"></p>
+        </div>
+        <details class="formats">
+          <summary>Supported files</summary>
+          <ul>
+            <li><b>MagIC</b> graphic files <code>G_#.TAG</code></li>
+            <li><b>MagIC</b> potentials <code>V_lmr</code>, <code>B_lmr</code>, <code>T_lmr</code>, <code>Xi_lmr</code></li>
+          </ul>
+          <p>Files are read locally in your browser and never uploaded.</p>
+        </details>
+      </section>
+
+      <section id="infoSection" hidden>
+        <h2 id="fileName">File</h2>
+        <dl id="info"></dl>
+        <details id="notesBox" hidden><summary>Run parameters</summary><pre id="notes"></pre></details>
+      </section>
+
+      <section id="controls" hidden>
+        <div id="magSection" hidden>
+          <h2>Magnetic field</h2>
+          <div class="group">
+            <label class="check"><input type="checkbox" id="showLines"> Field lines</label>
+            <div id="lineOpts" class="sub-opts" hidden>
+              <label class="slider">
+                <span>Number of lines <output id="nLinesOut"></output></span>
+                <input type="range" id="nLines" min="20" max="600" step="1" value="150">
+              </label>
+              <label class="slider" title="Potential field (current-free exterior) out to this radius; 1.00 r_o for interior lines only">
+                <span>Extrapolate to <output id="rExtOut"></output></span>
+                <input type="range" id="rExt" min="100" max="400" step="1" value="250">
+              </label>
+              <label class="slider" title="Maximum length a line may run inside r_o, per direction">
+                <span><span>Length inside r<sub>o</sub></span> <output id="inLenOut"></output></span>
+                <input type="range" id="inLen" min="0" max="600" step="1" value="200">
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <h2>Colors</h2>
+        <div class="row">
+          <select id="cmap" aria-label="Colormap"></select>
+          <label class="check compact"><input type="checkbox" id="cmapRev"> Reverse</label>
+        </div>
+        <label class="slider">
+          <span>Saturation <output id="satOut"></output></span>
+          <input type="range" id="sat" min="5" max="150" step="1" value="100">
+        </label>
+        <label class="slider">
+          <span>Shading <output id="shadingOut"></output></span>
+          <input type="range" id="shading" min="0" max="80" step="1" value="40">
+        </label>
+        <label class="check"><input type="checkbox" id="lockRange"> Lock range</label>
+      </section>
+    </div>
+    <footer class="status" id="status" role="status" aria-live="polite">
+      <div class="progress"><div id="progressBar"></div></div>
+      <span id="statusText">No file loaded.</span>
+    </footer>
+  </aside>
+
+  <main id="main">
+    <div id="view">
+      <canvas id="canvas"></canvas>
+      <div id="busy" class="busy" role="status" aria-live="polite" hidden>
+        <div class="busy-track"><div id="busyBar"></div></div>
+        <span id="busyText"></span>
+      </div>
+      <div id="empty" class="empty">
+        <p class="empty-title">Drop a simulation file to begin</p>
+        <p class="empty-sub">MagIC G or <code>*_lmr</code> files</p>
+      </div>
+      <div id="tooltip" class="tooltip" hidden></div>
+      <div id="viewActions" class="view-actions" hidden>
+        <button id="resetView" type="button">Reset view</button>
+        <button id="snapshot" type="button">Save PNG</button>
+      </div>
+      <div id="cbBox" class="cbar" hidden>
+        <div id="cbLabel" class="cbar-label"></div>
+        <div class="cbar-body">
+          <canvas id="colorbar" width="16" height="256" aria-label="Colorbar"></canvas>
+          <div class="cbar-ticks"><span id="cbMax"></span><span id="cbMid"></span><span id="cbMin"></span></div>
+        </div>
+      </div>
+      <button id="panelOpen" class="icon-btn floating" aria-label="Show controls" title="Show controls" hidden>☰</button>
+    </div>
+
+    <div id="viewBar" class="viewbar" hidden aria-label="View controls">
+      <div class="vb-row">
+        <select id="fieldSelect" aria-label="Field"></select>
+        <label class="check"><input type="checkbox" id="showShell" checked> Surface</label>
+        <label class="vb-slider grow">
+          <span class="vb-label">r</span>
+          <input type="range" id="radius" min="0" max="1" step="1" value="0" aria-label="Surface radius">
+          <output id="radiusOut"></output>
+        </label>
+      </div>
+      <div class="vb-row">
+        <label class="check"><input type="checkbox" id="showEq" checked> Equator</label>
+        <label class="check"><input type="checkbox" id="showMer"> Meridian</label>
+        <label class="vb-slider" id="phiRow">
+          <span class="vb-label">φ</span>
+          <input type="range" id="phi" min="0" max="359" step="1" value="300" aria-label="Meridian longitude">
+          <output id="phiOut"></output>
+        </label>
+        <label class="check"><input type="checkbox" id="cutaway" checked> Cut-away</label>
+        <label class="vb-slider" id="cutStartRow">
+          <span class="vb-label">from</span>
+          <input type="range" id="cutStart" min="0" max="359" step="1" value="300" aria-label="Cut from longitude">
+          <output id="cutStartOut"></output>
+        </label>
+        <label class="vb-slider" id="cutEndRow">
+          <span class="vb-label">to</span>
+          <input type="range" id="cutEnd" min="0" max="359" step="1" value="30" aria-label="Cut to longitude">
+          <output id="cutEndOut"></output>
+        </label>
+      </div>
+    </div>
+  </main>
+</div>
+<div id="dropOverlay" class="drop-overlay" hidden><p>Drop to open</p></div>
+<!-- Classic scripts, in dependency order, so the page also works from file:// -->
+<script src="js/colormaps.js"></script>
+<script src="js/core/sht.js"></script>
+<script src="js/core/grid.js"></script>
+<script src="js/core/spectral.js"></script>
+<script src="js/core/exterior.js"></script>
+<script src="js/core/fieldlines.js"></script>
+<script src="js/formats/magic.js"></script>
+<script src="js/formats/xshells.js"></script>
+<script src="js/formats/index.js"></script>
+<script src="js/worker.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

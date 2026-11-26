@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MagIC Viewer tests</title>
+<style>body{font:13px ui-monospace,monospace;margin:16px;background:#fff;color:#111}</style>
+</head>
+<body>
+<p>Usage: <code>test.html?refs=reference/a.json,reference/b.json&amp;data=URL-prefix-of-data-files</code></p>
+<pre id="out"></pre>
+<script src="../js/core/sht.js"></script>
+<script src="../js/core/grid.js"></script>
+<script src="../js/core/spectral.js"></script>
+<script src="../js/core/exterior.js"></script>
+<script src="../js/core/fieldlines.js"></script>
+<script src="../js/formats/magic.js"></script>
+<script src="../js/formats/xshells.js"></script>
+<script src="../js/formats/index.js"></script>
+<script type="module">
+const MV = {};
+for (const part of self.MV_PARTS) part(MV);
+const { openBuffer, makeExterior, SpectralProvider, lmLayout, sampleLevels, makeVolume, Tracer } = MV;
+
+const out = document.getElementById('out');
+const log = (s) => { out.textContent += s + '\n'; };
+const q = new URLSearchParams(location.search);
+const refs = (q.get('refs') || '').split(',').filter(Boolean);
+const dataPrefix = q.get('data') || '';
+let failures = 0;
+const check = (label, err, tol) => {
+  const ok = err <= tol;
+  if (!ok) failures++;
+  log(`${ok ? 'PASS' : 'FAIL'}  ${label}: rel. err ${err.toExponential(2)} (tol ${tol.toExponential(0)})`);
+};
+
+for (const refUrl of refs) {
+  const ref = await (await fetch(refUrl)).json();
+  const base = ref.file.split('/').pop();
+  log(`\n== ${base} (${ref.format})`);
+  const buf = await (await fetch(dataPrefix + base)).arrayBuffer();
+  let t0 = performance.now();
+  const p = openBuffer(buf, base, { experimental: true });
+  log(`opened as "${p.formatName}" in ${(performance.now() - t0).toFixed(0)} ms`);
+
+  if (ref.format === 'magic-graph') {
+    for (const c of ref.fields) {
+      let err = 0;
+      const cache = new Map();
+      for (const [ir, t, ph, v] of c.points) {
+        if (!cache.has(ir)) cache.set(ir, p.shell(c.field, ir));
+        err = Math.max(err, Math.abs(cache.get(ir)[t * p.nPhi + ph] - v));
+      }
+      check(`G ${c.field}`, err / c.scale, 1e-6);
+    }
+    continue;
+  }
+
+  // spectral formats: evaluate on the reference grid
+  p.setGrid(ref.colat, ref.nPhi);
+  const fid = (comp) => p.fields.find((f) => f.comp === comp).id;
+  const tol = 1e-5;
+  for (const c of ref.shells) {
+    t0 = performance.now();
+    const s = p.shell(fid(c.comp), c.ir);
+    const ms = performance.now() - t0;
+    let err = 0;
+    for (const [j, k, v] of c.points) err = Math.max(err, Math.abs(s[j * p.nPhi + k] - v));
+    check(`shell ir=${c.ir} comp=${c.comp} (${ms.toFixed(0)} ms)`, err / c.scale, tol);
+  }
+
+  // internal consistency: meridian(phi_k) and meridian(phi_k + pi) vs shell columns
+  for (const comp of p.fields.map((f) => f.comp)) {
+    const id = fid(comp), nt = p.nTheta, np = p.nPhi;
+    const k = Math.floor(np / 7);
+    t0 = performance.now();
+    const m0 = p.meridian(id, (2 * Math.PI * k) / np);
+    const ms = performance.now() - t0;
+    const mPi = p.meridian(id, (2 * Math.PI * k) / np + Math.PI);
+    let err = 0, scale = 0;
+    for (const ir of [3, Math.floor(p.radius.length / 2)]) {
+      const s = p.shell(id, ir);
+      for (let j = 0; j < nt; j++) {
+        const a = s[j * np + k], b = s[j * np + ((k + np / 2) % np)];
+        err = Math.max(err, Math.abs(m0[ir * nt + j] - a), Math.abs(mPi[ir * nt + j] - b));
+        scale = Math.max(scale, Math.abs(a), Math.abs(b));
+      }
+    }
+    check(`meridian vs shell comp=${comp} (pair ${ms.toFixed(0)} ms)`, err / scale, 1e-5);
+  }
+
+  // equator vs shell on a grid hugging the equator
+  for (const comp of p.fields.map((f) => f.comp)) {
+    const id = fid(comp);
+    t0 = performance.now();
+    const eq = p.equator(id);
+    const ms = performance.now() - t0;
+    const np0 = p.nPhi;
+    p.setGrid([Math.PI / 2 - 1e-5, Math.PI / 2 + 1e-5], np0);
+    let err = 0, scale = 0;
+    for (const ir of [3, Math.floor(p.radius.length / 2)]) {
+      const s = p.shell(id, ir);
+      for (let k = 0; k < np0; k++) {
+        const a = 0.5 * (s[k] + s[np0 + k]);
+        err = Math.max(err, Math.abs(eq[ir * np0 + k] - a));
+        scale = Math.max(scale, Math.abs(a));
+      }
+    }
+    p.setGrid(ref.colat, ref.nPhi);
+    check(`equator vs shell comp=${comp} (${ms.toFixed(0)} ms)`, err / scale, 1e-5);
+  }
+}
+// ---------------------------------------------------------------- magnetic
+// Potential-field extrapolation: continuity at r_o.
+for (const base of (q.get('mag') || '').split(',').filter(Boolean)) {
+  log(`\n== exterior: ${base}`);
+  const buf = await (await fetch(dataPrefix + base)).arrayBuffer();
+  const p = openBuffer(buf, base, { experimental: true });
+  if (!p.magnetic) { log('FAIL  no magnetic field detected'); failures++; continue; }
+  let io = 0;
+  p.radius.forEach((r, i) => { if (r > p.radius[io]) io = i; });
+  const ext = makeExterior(p, p.magnetic, 2 * p.radius[io], 4);
+  ext.radius[0] = p.radius[io]; // evaluate the potential field exactly at r_o
+  const names = ['B_r', 'B_θ', 'B_φ'];
+  for (let k = 0; k < 3; k++) {
+    const id = p.magnetic.ids[k];
+    const a = p.shell(id, io), b = ext.shell(id, 0);
+    let err = 0, scale = 0;
+    for (let i = 0; i < a.length; i++) { err = Math.max(err, Math.abs(a[i] - b[i])); scale = Math.max(scale, Math.abs(a[i])); }
+    // B_r: exact (spectral) or quadrature round trip (grid). Tangential components
+    // match only as well as the insulating boundary condition holds in the file.
+    const tol = k === 0 ? (p.lay ? 1e-5 : 1e-3) : 5e-2;
+    check(`${names[k]} continuity at r_o`, err / scale, tol);
+  }
+}
+
+// Field-line tracer on an axial dipole: lines satisfy r / sin^2(theta) = const.
+{
+  log('\n== tracer: axial dipole');
+  const lay = lmLayout(1, [0]);
+  const radius = Float64Array.from({ length: 40 }, (_, i) => 1 + (2 * i) / 39);
+  const Q = new Float64Array(2 * lay.lmMax), S = new Float64Array(2 * lay.lmMax), T = new Float64Array(2 * lay.lmMax);
+  const coef = (k) => {
+    Q[2] = 1 / radius[k] ** 3; S[2] = -Q[2] / 2; // l = 1 is lm index 1
+    return { q: Q, s: S, t: T };
+  };
+  const prov = new SpectralProvider({
+    lay, radius, kind: 'vector', coef, info: [],
+    fields: ['r', 't', 'p'].map((c) => ({ id: c, comp: c, signed: true })),
+  });
+  const vol = makeVolume(sampleLevels(prov, ['r', 't', 'p'], radius.map((_, i) => i)));
+  const tr = new Tracer(vol);
+  const { points, offsets } = tr.lines(1.05, 12, 0.005, 4000);
+  let worst = 0;
+  for (let i = 0; i + 1 < offsets.length; i++) {
+    const L = [];
+    for (let k = offsets[i]; k < offsets[i + 1]; k++) {
+      const x = points[3 * k], y = points[3 * k + 1], z = points[3 * k + 2];
+      const r = Math.hypot(x, y, z), s2 = (x * x + y * y) / (r * r);
+      if (s2 > 0.05) L.push(r / s2);
+    }
+    const mean = L.reduce((a, b) => a + b, 0) / L.length;
+    for (const v of L) worst = Math.max(worst, Math.abs(v - mean) / mean);
+  }
+  check(`${offsets.length - 1} dipole lines keep r/sin²θ`, worst, 1e-2);
+}
+
+log(`\n${failures ? failures + ' FAILURE(S)' : 'ALL PASSED'}`);
+document.title = 'DONE';
+</script>
+</body>
+</html>
