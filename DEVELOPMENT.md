@@ -1,0 +1,110 @@
+# MagIC Viewer: development notes
+
+User documentation is in [README.md](README.md).
+
+## Numerics
+
+- *Potential-field extrapolation* outside the outer boundary r_o assumes a
+  current-free insulating exterior: Q_lm(r) = Q_lm(r_o)(r_o/r)^(l+2) and
+  S_lm = −Q_lm/(l+1). For G files, B_r at r_o is first analysed into spherical
+  harmonics using Gauss–Legendre quadrature on MagIC's grid.
+- *Field lines* are traced with fixed-step RK4 through a coarse 3D sample of
+  **B**. Seeds are drawn in proportion to |B_r| near r_o. With extrapolation
+  on, lines start at r_o, run through the potential field, and continue into
+  the shell for at most "Length inside r_o". Each line is coloured by the sign
+  of B_r at its seed, with the ends of the magnetic colormap: the magnetic
+  components share one colormap choice and the other fields another, so the
+  lines keep the magnetic colours while another field is shown.
+- Memory: the whole file is held in memory. For spectral files the Legendre
+  tables are also kept, about 80 MB at ℓ_max ≈ 340. The memory meter counts the
+  file and every typed array reachable from the providers, against
+  `navigator.deviceMemory` (Chromium only, rounded and capped at 8 GB).
+
+## How it works
+
+- `js/formats/`: one adapter per code. Each detects its format from the header
+  and size, and returns a *provider*.
+  - `GridProvider` (`js/core/grid.js`): data that is already on a grid (MagIC G files).
+  - `SpectralProvider` (`js/core/spectral.js`): spherical-harmonic data. Adapters
+    convert their coefficients to one convention (orthonormal, no
+    Condon–Shortley phase) and supply radial/spheroidal/toroidal coefficients
+    (Q, S, T) at each radius. The provider synthesizes shells, the equator and
+    meridional planes. It uses Legendre parity, and computes the half-planes at
+    φ and φ+π in a single pass. The display grid resolves the data: at least
+    ℓ_max + 1 colatitudes and an FFT-friendly number of longitudes (at least
+    2 m_max + 2, about twice the colatitudes), e.g. 342 × 720 at ℓ_max = 341.
+    Longitudes are synthesized with a mixed-radix FFT (`InverseDFT` in
+    `js/core/sht.js`).
+- Radial derivatives of poloidal potentials (needed only for the θ and φ
+  components, so they are computed on first use):
+  - MagIC Chebyshev grids, including mapped grids: exact (Chebyshev, through the
+    grid mapping).
+  - XSHELLS: second-order finite differences, as in `xspp` and `pyxshells`.
+  - Other grids: fourth-order finite differences.
+- Everything heavy runs in a Web Worker (`js/worker.js`).
+- No build step, and `index.html` also works when opened straight from disk
+  (`file://`), where browsers block ES modules and worker files. So the code uses
+  classic scripts: each file defines one function, e.g. `function mvSht(MV)`.
+  That function reads what it needs from the shared namespace `MV`, adds its
+  exports to it, and registers itself in `self.MV_PARTS`. `index.html` loads the
+  files in dependency order. `js/main.js` runs every part except `mvWorker`, and
+  starts the worker from a Blob built from the source of all the parts, so no
+  worker file has to be fetched. three.js is loaded from the CDN with dynamic
+  `import()` through the import map, which needs an internet connection.
+
+### Adding another code
+
+Write `js/formats/<code>.js` in the same pattern as `js/formats/magic.js`: a
+function `mv<Code>(MV)` that adds an adapter `{ name, detect(buf, name), open(buf, name, header) }`
+to `MV` and registers itself in `self.MV_PARTS`. Have `open` return either a
+`GridProvider` or a `SpectralProvider`. Then add the adapter to `FORMATS` (or
+`EXPERIMENTAL`) in `js/formats/index.js`, and add a `<script>` tag for the file
+before `js/formats/index.js` in `index.html` and `tests/test.html`.
+
+## Experimental readers
+
+A reader for [XSHELLS](https://nschaeff.bitbucket.io/xshells/) field files
+(`fieldU_*`, `fieldB_*`, …) is in `js/formats/xshells.js`. It is listed under
+`EXPERIMENTAL` in `js/formats/index.js` and only used with `?experimental=1` in
+the page URL, until it has been validated. `tests/test.html` always enables it.
+
+## Tests
+
+`tests/make_reference.py` evaluates fields with each code's own Python tools
+(`pyxshells` + `shtns`, and the `magic` package). `tests/test.html` compares the
+viewer's readers and transforms against those values.
+
+For example, for a run in `~/runs/dynamo` with files `G_1.run1` and
+`V_lmr_1.run1`, and this repository cloned to `~/magicviewer`:
+
+```sh
+# reference values (needs the MagIC python package on PYTHONPATH);
+# writes tests/reference/G_1.run1.json and tests/reference/V_lmr_1.run1.json
+cd ~/magicviewer
+python tests/make_reference.py magic_graph ~/runs/dynamo/G_1.run1 magic_pot ~/runs/dynamo/V_lmr_1.run1
+
+# serve a folder that holds both the repository and the data files
+cd ~/runs/dynamo && ln -s ~/magicviewer . && python -m http.server
+```
+
+Then open
+`http://localhost:8000/magicviewer/tests/test.html?refs=reference/G_1.run1.json,reference/V_lmr_1.run1.json&data=/`.
+`refs` lists the reference files and `data` is the URL prefix of the data files
+on that server. The page ends with `ALL PASSED` or the number of failures. The
+XSHELLS case works the same way: `python tests/make_reference.py xshells fieldU_0001.job`
+(needs `pyxshells` and `shtns`).
+
+`tests/shoot.py` drives headless Chrome to take screenshots. With `--file` it
+opens a local file in the page, which also works for `file://` pages:
+
+```sh
+python tests/shoot.py file://$HOME/magicviewer/index.html out.png --file ~/runs/dynamo/G_1.run1 \
+    --wait "document.documentElement.dataset.state === 'ready'"
+```
+
+## Deployment
+
+The site is static, with no build step. It is served by GitHub Pages from the
+`main` branch (root folder) of
+[AnkitBarik/magicviewer](https://github.com/AnkitBarik/magicviewer) at
+<https://ankitbarik.github.io/magicviewer/>, and every push to `main` updates it.

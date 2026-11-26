@@ -1,0 +1,46 @@
+# --- Simulation output -------------------------------------------------------
+# Data files are loaded in the browser, never committed (they are large).
+# MagIC: graphic files, potentials, checkpoints, logs and other outputs
+G_[0-9]*
+G_ave*
+*_lmr_[0-9]*
+checkpoint_*
+log.*
+# XSHELLS field files (the reader is experimental)
+field[UBTCVJ]*
+# HDF5 / NetCDF
+*.h5
+*.hdf5
+*.nc
+
+# Reference values for tests/test.html are small JSON files and are committed,
+# even though their names follow the data file they were made from.
+!tests/reference/*.json
+
+# --- Test and screenshot output -------------------------------------------------
+# tests/shoot.py screenshots and other local results
+*.png
+*.jpg
+!docs/**/*.png
+!docs/**/*.jpg
+
+# --- Python (tests/make_reference.py, tests/shoot.py) -----------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# --- Editors and OS -----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Local tooling --------------------------------------------------------------
+node_modules/
+.claude/settings.local.json

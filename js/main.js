@@ -236,9 +236,14 @@ let meta = null;
 // sel: selected shell, either an interior radial index or an exterior
 // (potential-field) level when ext is true
 const deg = (d) => (d * Math.PI) / 180;
+const MAG_CMAP = 'PRGn_r'; // default for magnetic field maps and field lines: purple outward, green inward
 const state = {
   field: null, sel: { ir: 0, ext: false }, phi: deg(300), sat: 1, extRadii: null,
   cutStart: deg(300), cutEnd: deg(30), // cut-away wedge, counter-clockwise from start to end
+  // Colormap choices, kept separately for the magnetic components (which also
+  // colour the field lines) and for the other fields; null = field default.
+  magCmap: { name: MAG_CMAP, rev: false },
+  otherCmap: null,
 };
 const cache = new Map(); // key -> Float32Array
 showMemory();
@@ -309,8 +314,6 @@ function setupForFile() {
   ui.notesBox.hidden = !meta.notes;
   ui.notes.textContent = meta.notes ?? '';
 
-  // magnetic components default to PRGn_r (purple positive, green negative)
-  for (const f of meta.fields) if (meta.magnetic?.ids.includes(f.id)) f.cmap ??= 'PRGn_r';
   ui.field.replaceChildren(...meta.fields.map((f) => new Option(f.label, f.id)));
   state.field = meta.fields[0].id;
   ui.field.value = state.field;
@@ -338,13 +341,33 @@ function currentField() {
   return meta.fields.find((f) => f.id === state.field);
 }
 
+// Colormap for the selected field: the magnetic components share one choice
+// (state.magCmap, also used by the field lines); other fields share another
+// (state.otherCmap) when it suits them, else their own default.
 function pickDefaultCmap() {
   const f = currentField();
-  if (f.cmap) { ui.cmap.value = f.cmap; return; }
+  if (isMagneticField()) {
+    ui.cmap.value = state.magCmap.name;
+    ui.cmapRev.checked = state.magCmap.rev;
+    return;
+  }
+  const o = state.otherCmap;
   const list = f.signed ? DIVERGING : SEQUENTIAL;
-  // keep the user's choice when it suits the field, but not another field's special default
-  const special = new Set(meta.fields.map((x) => x.cmap).filter(Boolean));
-  if (!list.includes(ui.cmap.value) || special.has(ui.cmap.value)) ui.cmap.value = f.signed ? 'RdBu_r' : 'magma';
+  if (f.cmap) ui.cmap.value = f.cmap;
+  else ui.cmap.value = o && list.includes(o.name) ? o.name : f.signed ? 'RdBu_r' : 'magma';
+  ui.cmapRev.checked = o ? o.rev : false;
+}
+// A colormap picked while a magnetic component is selected becomes the
+// magnetic choice (and recolours the field lines); otherwise the other one.
+function onCmapChange() {
+  const sel = { name: ui.cmap.value, rev: ui.cmapRev.checked };
+  if (isMagneticField()) {
+    state.magCmap = sel;
+    colorLines();
+  } else {
+    state.otherCmap = sel;
+  }
+  recolor();
 }
 
 const isMagneticField = () => !!meta?.magnetic?.ids.includes(state.field);
@@ -749,27 +772,43 @@ async function updateLines() {
     const { points, offsets, polarity } = m;
     let nseg = 0;
     for (let i = 0; i < polarity.length; i++) nseg += offsets[i + 1] - offsets[i] - 1;
-    const pos = new Float32Array(nseg * 6), col = new Float32Array(nseg * 6);
-    const out = [0.80, 0.22, 0.17], inw = [0.16, 0.42, 0.76]; // B_r > 0 / < 0 at the seed
+    const pos = new Float32Array(nseg * 6);
     const s = 1 / meta.rmax;
     let o = 0;
     for (let i = 0; i < polarity.length; i++) {
-      const c = polarity[i] > 0 ? out : inw;
       for (let k = offsets[i]; k < offsets[i + 1] - 1; k++) {
         for (let d = 0; d < 6; d++) pos[o + d] = points[3 * k + d] * s;
-        col.set(c, o); col.set(c, o + 3);
         o += 6;
       }
     }
     const g = new LineSegmentsGeometry();
     g.setPositions(pos);
-    g.setColors(col);
+    g.userData.lines = { offsets, polarity, nseg };
     lineGroup.add(new LineSegments2(g, lineMaterial));
-    requestRender();
+    colorLines();
     setStatus(`${polarity.length} field lines` + (m.ms > 300 ? ` · ${(m.ms / 1000).toFixed(1)} s` : ''), null, false, true);
   } catch (err) {
     if (gen === linesGen) setStatus(err.message, null, true);
   }
+}
+
+// Colour the field lines with the magnetic colormap (state.magCmap): its
+// strong ends for B_r > 0 / < 0 at the seed, like the magnetic field maps.
+function colorLines() {
+  const line = lineGroup.children[0];
+  if (!line) return;
+  const { offsets, polarity, nseg } = line.geometry.userData.lines;
+  const table = lut(state.magCmap.name, state.magCmap.rev);
+  const at = (t) => { const k = 3 * Math.round(255 * t); return [table[k], table[k + 1], table[k + 2]]; };
+  const out = at(0.92), inw = at(0.08);
+  const col = new Float32Array(nseg * 6);
+  let o = 0;
+  for (let i = 0; i < polarity.length; i++) {
+    const c = polarity[i] > 0 ? out : inw;
+    for (let k = offsets[i]; k < offsets[i + 1] - 1; k++) { col.set(c, o); col.set(c, o + 3); o += 6; }
+  }
+  line.geometry.setColors(col);
+  requestRender();
 }
 
 // Move the camera back (never closer) so that a sphere of radius R (in r_o) fits.
@@ -909,8 +948,8 @@ ui.inLen.addEventListener('input', syncLabels);
 ui.inLen.addEventListener('change', updateLines);
 ui.rExt.addEventListener('input', syncLabels);
 ui.rExt.addEventListener('change', () => { if (ui.showLines.checked) setExtrapolation(); });
-ui.cmap.addEventListener('change', recolor);
-ui.cmapRev.addEventListener('change', recolor);
+ui.cmap.addEventListener('change', onCmapChange);
+ui.cmapRev.addEventListener('change', onCmapChange);
 ui.sat.addEventListener('input', () => {
   state.sat = Number(ui.sat.value) / 100;
   syncLabels();
